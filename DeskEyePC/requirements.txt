@@ -1,0 +1,13 @@
+# GUI
+PyQt6>=6.7.0
+
+# Capture and processing of MJPEG
+opencv-python>=4.10.0
+numpy>=1.26.0
+requests>=2.32.0
+
+# virtual camera
+# Windows: UnityCapture
+# Linux:   v4l2loopback-dkms && sudo modprobe v4l2loopback
+# macOS:   OBS Studio with plugin of virtual camera
+pyvirtualcam>=0.10.0
