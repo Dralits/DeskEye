@@ -10,7 +10,6 @@ import androidx.activity.compose.setContent
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.activity.viewModels
 import androidx.camera.core.CameraSelector
-import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
@@ -44,6 +43,7 @@ import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -55,13 +55,13 @@ import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalLifecycleOwner
 import androidx.compose.ui.text.AnnotatedString
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
-import androidx.compose.ui.platform.LocalLifecycleOwner
 import com.dralit.DeskEye.ui.theme.DeskEyeTheme
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
@@ -79,7 +79,7 @@ class MainActivity : ComponentActivity() {
                     modifier = Modifier.fillMaxSize(),
                     color = MaterialTheme.colorScheme.background
                 ) {
-                    DeskEyeApp(viewModel = viewModel, cameraExecutor = cameraExecutor)
+                    DeskEyeApp(viewModel = viewModel)
                 }
             }
         }
@@ -87,13 +87,12 @@ class MainActivity : ComponentActivity() {
 
     override fun onDestroy() {
         super.onDestroy()
-        viewModel.stopServer()
         cameraExecutor.shutdown()
     }
 }
 
 @Composable
-fun DeskEyeApp(viewModel: CameraViewModel, cameraExecutor: ExecutorService) {
+fun DeskEyeApp(viewModel: CameraViewModel) {
     val context = LocalContext.current
     val uiState by viewModel.uiState.collectAsState()
 
@@ -105,9 +104,30 @@ fun DeskEyeApp(viewModel: CameraViewModel, cameraExecutor: ExecutorService) {
         )
     }
 
+    var hasNotificationPermission by remember {
+        mutableStateOf(
+            if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                ContextCompat.checkSelfPermission(
+                    context, Manifest.permission.POST_NOTIFICATIONS
+                ) == PackageManager.PERMISSION_GRANTED
+            } else true
+        )
+    }
+
     val permissionLauncher = rememberLauncherForActivityResult(
-        contract = ActivityResultContracts.RequestPermission()
-    ) { granted -> hasCameraPermission = granted }
+        contract = ActivityResultContracts.RequestMultiplePermissions()
+    ) { permissions ->
+        hasCameraPermission = permissions[Manifest.permission.CAMERA] ?: hasCameraPermission
+        hasNotificationPermission = permissions[Manifest.permission.POST_NOTIFICATIONS] ?: hasNotificationPermission
+    }
+
+    androidx.compose.runtime.LaunchedEffect(Unit) {
+        val permissions = mutableListOf(Manifest.permission.CAMERA)
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+        }
+        permissionLauncher.launch(permissions.toTypedArray())
+    }
 
     var portInput by remember { mutableStateOf("4444") }
 
@@ -129,13 +149,34 @@ fun DeskEyeApp(viewModel: CameraViewModel, cameraExecutor: ExecutorService) {
                 modifier = Modifier
                     .fillMaxWidth()
                     .weight(1f)
-                    .clip(MaterialTheme.shapes.large)
+                    .clip(MaterialTheme.shapes.large),
+                contentAlignment = Alignment.Center
             ) {
-                CameraPreview(
-                    viewModel = viewModel,
-                    cameraExecutor = cameraExecutor,
-                    modifier = Modifier.fillMaxSize()
-                )
+                if (!uiState.isServerRunning) {
+                    CameraPreview(
+                        modifier = Modifier.fillMaxSize()
+                    )
+                } else {
+                    Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                        Icon(
+                            imageVector = Icons.Default.PlayArrow,
+                            contentDescription = null,
+                            modifier = Modifier.size(64.dp),
+                            tint = Color(0xFF3B82F6)
+                        )
+                        Spacer(Modifier.height(8.dp))
+                        Text(
+                            "Streaming active",
+                            style = MaterialTheme.typography.titleLarge,
+                            fontWeight = FontWeight.Bold
+                        )
+                        Text(
+                            "Preview disabled to save resources",
+                            style = MaterialTheme.typography.bodyMedium,
+                            color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
             }
 
             Spacer(modifier = Modifier.height(16.dp))
@@ -196,7 +237,13 @@ fun DeskEyeApp(viewModel: CameraViewModel, cameraExecutor: ExecutorService) {
                 Column(horizontalAlignment = Alignment.CenterHorizontally) {
                     Text("Camera permission is required to continue.")
                     Spacer(Modifier.height(12.dp))
-                    Button(onClick = { permissionLauncher.launch(Manifest.permission.CAMERA) }) {
+                    Button(onClick = { 
+                        val permissions = mutableListOf(Manifest.permission.CAMERA)
+                        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.TIRAMISU) {
+                            permissions.add(Manifest.permission.POST_NOTIFICATIONS)
+                        }
+                        permissionLauncher.launch(permissions.toTypedArray()) 
+                    }) {
                         Text("Grant permission")
                     }
                 }
@@ -208,7 +255,6 @@ fun DeskEyeApp(viewModel: CameraViewModel, cameraExecutor: ExecutorService) {
 @Composable
 fun ServerStatusCard(uiState: CameraUiState) {
     val clipboardManager = LocalClipboardManager.current
-    val streamUrl = "http://${uiState.ipAddress}:${uiState.port}/stream"
 
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(modifier = Modifier.padding(16.dp)) {
@@ -265,10 +311,6 @@ fun ServerStatusCard(uiState: CameraUiState) {
                 }
                 Spacer(Modifier.height(4.dp))
                 Text(
-                    "Frames sent: ${uiState.framesServed}",
-                    style = MaterialTheme.typography.bodySmall
-                )
-                Text(
                     "Use this information in PC app to connect the camera, " +
                             "your PC must be connected to the same WiFi.",
                     style = MaterialTheme.typography.bodySmall,
@@ -295,11 +337,10 @@ fun ServerStatusCard(uiState: CameraUiState) {
 
 @Composable
 fun CameraPreview(
-    viewModel: CameraViewModel,
-    cameraExecutor: ExecutorService,
     modifier: Modifier = Modifier
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
+    val context = LocalContext.current
 
     AndroidView(
         modifier = modifier,
@@ -314,20 +355,12 @@ fun CameraPreview(
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
-                // Resolución moderada: suficiente calidad para streaming local
-                // sin sobrecargar CPU/red con frames grandes.
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(640, 480))
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also { it.setAnalyzer(cameraExecutor, viewModel.imageAnalyzer) }
-
                 val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
 
                 try {
                     cameraProvider.unbindAll()
                     cameraProvider.bindToLifecycle(
-                        lifecycleOwner, cameraSelector, preview, imageAnalysis
+                        lifecycleOwner, cameraSelector, preview
                     )
                 } catch (exc: Exception) {
                     exc.printStackTrace()
@@ -337,4 +370,17 @@ fun CameraPreview(
             previewView
         }
     )
+    
+    // Al destruir este componente, nos aseguramos de liberar la cámara
+    DisposableEffect(Unit) {
+        onDispose {
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+            try {
+                val cameraProvider = cameraProviderFuture.get()
+                cameraProvider.unbindAll()
+            } catch (exc: Exception) {
+                exc.printStackTrace()
+            }
+        }
+    }
 }

@@ -6,6 +6,7 @@
 *.njsproj
 *.sln
 *.swp
+*.exe
 Thumbs.db
 db.db
 Desktop.ini

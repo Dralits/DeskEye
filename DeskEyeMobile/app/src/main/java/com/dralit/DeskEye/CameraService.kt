@@ -5,6 +5,7 @@ import android.app.NotificationChannel
 import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
+import android.content.pm.ServiceInfo
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
@@ -78,12 +79,19 @@ class CameraService : LifecycleService() {
             .setForegroundServiceBehavior(NotificationCompat.FOREGROUND_SERVICE_IMMEDIATE)
             .build()
 
-        startForeground(NOTIFICATION_ID, notification)
+        if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+            startForeground(
+                NOTIFICATION_ID, 
+                notification, 
+                ServiceInfo.FOREGROUND_SERVICE_TYPE_CAMERA
+            )
+        } else {
+            startForeground(NOTIFICATION_ID, notification)
+        }
         
-        // WakeLock para evitar que la CPU se duerma
         val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
         wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DeskEye::CameraWakeLock").apply {
-            acquire(10 * 60 * 1000L /*10 minutes*/)
+            acquire(10 * 60 * 1000L)
         }
     }
 
@@ -98,6 +106,7 @@ class CameraService : LifecycleService() {
             cameraProviderFuture.addListener({
                 val cameraProvider = cameraProviderFuture.get()
                 
+                // SOLO configuramos ImageAnalysis para el stream MJPEG (ahorro de recursos en móvil)
                 val imageAnalysis = ImageAnalysis.Builder()
                     .setTargetResolution(Size(640, 480))
                     .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)

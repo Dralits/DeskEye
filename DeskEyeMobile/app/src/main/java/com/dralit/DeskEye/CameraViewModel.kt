@@ -1,21 +1,20 @@
 package com.dralit.DeskEye
 
 import android.app.Application
+import android.content.Intent
 import android.util.Log
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
 import androidx.lifecycle.AndroidViewModel
-import fi.iki.elonen.NanoHTTPD
+import androidx.lifecycle.viewModelScope
 import kotlinx.coroutines.flow.MutableStateFlow
 import kotlinx.coroutines.flow.StateFlow
 import kotlinx.coroutines.flow.asStateFlow
-import java.io.IOException
+import kotlinx.coroutines.launch
 import java.net.Inet4Address
 import java.net.NetworkInterface
 import java.util.Collections
-import java.util.concurrent.atomic.AtomicLong
 
-/** Estado de UI expuesto por el ViewModel a la pantalla Compose. */
 data class CameraUiState(
     val isServerRunning: Boolean = false,
     val ipAddress: String = "—",
@@ -26,109 +25,66 @@ data class CameraUiState(
 
 class CameraViewModel(application: Application) : AndroidViewModel(application) {
 
-    companion object {
-        private const val TAG = "CameraViewModel"
-
-        /** Límite de FPS hacia el repositorio (no afecta a la previsualización en pantalla). */
-        private const val TARGET_FPS = 15
-        private const val JPEG_QUALITY = 70
-    }
-
-    private val frameRepository = FrameRepository()
-    private var mjpegServer: MjpegHttpServer? = null
-
     private val _uiState = MutableStateFlow(CameraUiState())
     val uiState: StateFlow<CameraUiState> = _uiState.asStateFlow()
 
-    private val frameCounter = AtomicLong(0)
-    private var lastAnalyzedTimestampMs = 0L
-    private val minFrameIntervalMs = 1000L / TARGET_FPS
+    // Este analyzer es SOLO para la previsualización local si se requiere, 
+    // pero la lógica de stream ahora vive en el servicio.
+    val imageAnalyzer = ImageAnalysis.Analyzer { it.close() }
 
-
-    val imageAnalyzer = ImageAnalysis.Analyzer { imageProxy -> processFrame(imageProxy) }
-
-    private fun processFrame(imageProxy: ImageProxy) {
-        val now = System.currentTimeMillis()
-        if (now - lastAnalyzedTimestampMs < minFrameIntervalMs) {
-            imageProxy.close()
-            return
-        }
-        lastAnalyzedTimestampMs = now
-
-        try {
-            val jpeg = ImageUtils.imageProxyToJpeg(imageProxy, quality = JPEG_QUALITY)
-            frameRepository.updateFrame(jpeg)
-
-            val count = frameCounter.incrementAndGet()
-            if (count % 30 == 0L) { // refrescamos el contador en UI cada ~2s a 15fps
-                _uiState.value = _uiState.value.copy(framesServed = count)
+    init {
+        // Observamos el estado del servicio para actualizar la UI
+        viewModelScope.launch {
+            CameraService.isRunning.collect { running ->
+                _uiState.value = _uiState.value.copy(
+                    isServerRunning = running,
+                    ipAddress = if (running) getLocalIpAddress() else "—"
+                )
             }
-        } catch (e: Exception) {
-            Log.e(TAG, "Error processing frame", e)
-        } finally {
-            imageProxy.close()
+        }
+        viewModelScope.launch {
+            CameraService.framesServed.collect { frames ->
+                _uiState.value = _uiState.value.copy(framesServed = frames)
+            }
+        }
+        viewModelScope.launch {
+            CameraService.port.collect { port ->
+                _uiState.value = _uiState.value.copy(port = port)
+            }
         }
     }
 
-    /** Arranca el servidor MJPEG en el puerto indicado. No hace nada si ya está activo. */
-    fun startServer(port: Int = 8080) {
-        if (mjpegServer != null) return
-
-        try {
-            val server = MjpegHttpServer(port, frameRepository)
-            server.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
-            mjpegServer = server
-
-            _uiState.value = _uiState.value.copy(
-                isServerRunning = true,
-                ipAddress = getLocalIpAddress(),
-                port = port,
-                framesServed = 0,
-                errorMessage = null
-            )
-        } catch (e: IOException) {
-            Log.e(TAG, "Unable to start the server", e)
-            _uiState.value = _uiState.value.copy(
-                isServerRunning = false,
-                errorMessage = "Unable to start the server on port $port: ${e.message}"
-            )
+    fun startServer(port: Int = 4444) {
+        val intent = Intent(getApplication(), CameraService::class.java).apply {
+            putExtra("port", port)
+        }
+        if (android.os.Build.VERSION.SDK_INT >= android.os.Build.VERSION_CODES.O) {
+            getApplication<Application>().startForegroundService(intent)
+        } else {
+            getApplication<Application>().startService(intent)
         }
     }
 
-    /** Detiene el servidor MJPEG si está en marcha. */
     fun stopServer() {
-        mjpegServer?.stop()
-        mjpegServer = null
-        _uiState.value = _uiState.value.copy(isServerRunning = false)
+        val intent = Intent(getApplication(), CameraService::class.java)
+        getApplication<Application>().stopService(intent)
     }
 
-    /**
-     * Busca una dirección IPv4 no-loopback en las interfaces de red disponibles,
-     * priorizando la interfaz WiFi (wlan0) ya que es el caso de uso principal
-     * (PC y móvil en la misma red local).
-     */
     private fun getLocalIpAddress(): String {
         return try {
             val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
-
             val candidates = interfaces.flatMap { intf ->
                 Collections.list(intf.inetAddresses)
                     .filterIsInstance<Inet4Address>()
                     .filter { !it.isLoopbackAddress }
                     .map { intf.name to it.hostAddress }
             }
-
             candidates.firstOrNull { (name, _) -> name.contains("wlan") }?.second
                 ?: candidates.firstOrNull()?.second
                 ?: "Not available"
         } catch (e: Exception) {
-            Log.e(TAG, "Unable to get local IP address", e)
+            Log.e("CameraViewModel", "Unable to get local IP address", e)
             "Not available"
         }
-    }
-
-    override fun onCleared() {
-        super.onCleared()
-        stopServer()
     }
 }

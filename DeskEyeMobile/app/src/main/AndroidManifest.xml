@@ -3,6 +3,11 @@
 
     <!-- Permiso runtime: necesario para capturar la previsualización y los frames -->
     <uses-permission android:name="android.permission.CAMERA" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE" />
+    <uses-permission android:name="android.permission.FOREGROUND_SERVICE_CAMERA" />
+    <uses-permission android:name="android.permission.WAKE_LOCK" />
+    <uses-permission android:name="android.permission.POST_NOTIFICATIONS" />
+
 
     <!-- Permisos normales (no requieren diálogo): servidor HTTP local y obtención de IP -->
     <uses-permission android:name="android.permission.INTERNET" />
@@ -22,6 +27,10 @@
         android:icon="@mipmap/deskeyelogo"
         android:roundIcon="@mipmap/deskeyelogo_round"
         >
+        <service
+            android:name=".CameraService"
+            android:foregroundServiceType="camera"
+            android:exported="false" />
 
         <activity
             android:name=".MainActivity"
@@ -33,6 +42,7 @@
                 <category android:name="android.intent.category.LAUNCHER" />
             </intent-filter>
         </activity>
+
     </application>
 
 </manifest>
