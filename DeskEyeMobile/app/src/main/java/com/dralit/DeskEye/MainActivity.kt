@@ -1,6 +1,7 @@
 package com.dralit.DeskEye
 
 import android.Manifest
+import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
 import android.util.Size
@@ -30,6 +31,7 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
 import androidx.compose.material3.Button
@@ -153,8 +155,10 @@ fun DeskEyeApp(viewModel: CameraViewModel) {
                 contentAlignment = Alignment.Center
             ) {
                 if (!uiState.isServerRunning) {
+                    val isBack by CameraService.isBackCamera.collectAsState()
                     CameraPreview(
-                        modifier = Modifier.fillMaxSize()
+                        modifier = Modifier.fillMaxSize(),
+                        isBackCamera = isBack
                     )
                 } else {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
@@ -180,17 +184,31 @@ fun DeskEyeApp(viewModel: CameraViewModel) {
             }
 
             Spacer(modifier = Modifier.height(16.dp))
-
-            OutlinedTextField(
-                value = portInput,
-                onValueChange = { if (it.length <= 5) portInput = it.filter(Char::isDigit) },
-                label = { Text("Port") },
-                singleLine = true,
-                enabled = !uiState.isServerRunning,
-                keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
-                modifier = Modifier.fillMaxWidth()
-            )
-
+            Row(
+                modifier = Modifier.fillMaxWidth(),
+                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                verticalAlignment = Alignment.CenterVertically
+            ) {
+                OutlinedTextField(
+                    value = portInput,
+                    onValueChange = { if (it.length <= 5) portInput = it.filter(Char::isDigit) },
+                    label = { Text("Port") },
+                    singleLine = true,
+                    enabled = !uiState.isServerRunning,
+                    keyboardOptions = KeyboardOptions(keyboardType = KeyboardType.Number),
+                    modifier = Modifier.weight(1f)
+                )
+                Button(
+                    onClick = { viewModel.toggleCamera() },
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.height(56.dp) // Alineamos altura con el TextField
+                ) {
+                    Icon(
+                        imageVector = Icons.Default.FlipCameraAndroid,
+                        contentDescription = "Cambiar cámara"
+                    )
+                }
+            }
             Spacer(modifier = Modifier.height(12.dp))
 
             ServerStatusCard(uiState = uiState)
@@ -337,7 +355,8 @@ fun ServerStatusCard(uiState: CameraUiState) {
 
 @Composable
 fun CameraPreview(
-    modifier: Modifier = Modifier
+    modifier: Modifier = Modifier,
+    isBackCamera: Boolean = true
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
@@ -345,9 +364,10 @@ fun CameraPreview(
     AndroidView(
         modifier = modifier,
         factory = { ctx ->
-            val previewView = PreviewView(ctx)
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(ctx)
-
+            PreviewView(ctx)
+        },
+        update = { previewView ->
+            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
             cameraProviderFuture.addListener({
                 val cameraProvider = cameraProviderFuture.get()
 
@@ -355,7 +375,11 @@ fun CameraPreview(
                     it.setSurfaceProvider(previewView.surfaceProvider)
                 }
 
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
+                val cameraSelector = if (isBackCamera) {
+                    CameraSelector.DEFAULT_BACK_CAMERA
+                } else {
+                    CameraSelector.DEFAULT_FRONT_CAMERA
+                }
 
                 try {
                     cameraProvider.unbindAll()
@@ -365,9 +389,7 @@ fun CameraPreview(
                 } catch (exc: Exception) {
                     exc.printStackTrace()
                 }
-            }, ContextCompat.getMainExecutor(ctx))
-
-            previewView
+            }, ContextCompat.getMainExecutor(context))
         }
     )
     

@@ -70,6 +70,13 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         getApplication<Application>().stopService(intent)
     }
 
+    fun toggleCamera() {
+        val intent = Intent(getApplication(), CameraService::class.java).apply {
+            action = CameraService.ACTION_TOGGLE_CAMERA
+        }
+        getApplication<Application>().startService(intent)
+    }
+
     private fun getLocalIpAddress(): String {
         return try {
             val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())

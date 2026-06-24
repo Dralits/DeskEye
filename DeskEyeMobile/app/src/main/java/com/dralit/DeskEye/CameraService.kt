@@ -40,6 +40,11 @@ class CameraService : LifecycleService() {
         private val _port = MutableStateFlow(4444)
         val port: StateFlow<Int> = _port
 
+        private val _isBackCamera = MutableStateFlow(true)
+        val isBackCamera: StateFlow<Boolean> = _isBackCamera
+
+        const val ACTION_TOGGLE_CAMERA = "com.dralit.DeskEye.TOGGLE_CAMERA"
+
         private const val TARGET_FPS = 15
         private const val JPEG_QUALITY = 70
     }
@@ -60,11 +65,18 @@ class CameraService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         
-        val port = intent?.getIntExtra("port", 4444) ?: 4444
-        _port.value = port
-        
-        startForegroundService(port)
-        startCameraAndServer(port)
+        if (intent?.action == ACTION_TOGGLE_CAMERA) {
+            _isBackCamera.value = !_isBackCamera.value
+            if (_isRunning.value) {
+                bindCamera()
+            }
+        } else {
+            val port = intent?.getIntExtra("port", 4444) ?: 4444
+            _port.value = port
+            
+            startForegroundService(port)
+            startCameraAndServer(port)
+        }
         
         return START_STICKY
     }
@@ -97,40 +109,49 @@ class CameraService : LifecycleService() {
 
     private fun startCameraAndServer(port: Int) {
         try {
-            mjpegServer = MjpegHttpServer(port, frameRepository)
-            mjpegServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            if (mjpegServer == null) {
+                mjpegServer = MjpegHttpServer(port, frameRepository)
+                mjpegServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
+            }
             _isRunning.value = true
             _framesServed.value = 0
             
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
-            cameraProviderFuture.addListener({
-                val cameraProvider = cameraProviderFuture.get()
-                
-                // SOLO configuramos ImageAnalysis para el stream MJPEG (ahorro de recursos en móvil)
-                val imageAnalysis = ImageAnalysis.Builder()
-                    .setTargetResolution(Size(640, 480))
-                    .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
-                    .build()
-                    .also {
-                        it.setAnalyzer(cameraExecutor) { imageProxy ->
-                            processFrame(imageProxy)
-                        }
-                    }
-
-                val cameraSelector = CameraSelector.DEFAULT_BACK_CAMERA
-
-                try {
-                    cameraProvider.unbindAll()
-                    cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
-                } catch (exc: Exception) {
-                    Log.e(TAG, "Use case binding failed", exc)
-                }
-            }, ContextCompat.getMainExecutor(this))
+            bindCamera()
 
         } catch (e: IOException) {
             Log.e(TAG, "Server failed to start", e)
             stopSelf()
         }
+    }
+
+    private fun bindCamera() {
+        val cameraProviderFuture = ProcessCameraProvider.getInstance(this)
+        cameraProviderFuture.addListener({
+            val cameraProvider = cameraProviderFuture.get()
+            
+            val imageAnalysis = ImageAnalysis.Builder()
+                .setTargetResolution(Size(640, 480))
+                .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+                .build()
+                .also {
+                    it.setAnalyzer(cameraExecutor) { imageProxy ->
+                        processFrame(imageProxy)
+                    }
+                }
+
+            val cameraSelector = if (_isBackCamera.value) {
+                CameraSelector.DEFAULT_BACK_CAMERA
+            } else {
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            }
+
+            try {
+                cameraProvider.unbindAll()
+                cameraProvider.bindToLifecycle(this, cameraSelector, imageAnalysis)
+            } catch (exc: Exception) {
+                Log.e(TAG, "Use case binding failed", exc)
+            }
+        }, ContextCompat.getMainExecutor(this))
     }
 
     private fun processFrame(imageProxy: ImageProxy) {
