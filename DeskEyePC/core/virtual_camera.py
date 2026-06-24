@@ -164,9 +164,6 @@ class VirtualCamera:
     def available_resolutions() -> list[tuple[int, int, str]]:
         """Resoluciones predefinidas ordenadas de mayor a menor calidad."""
         return [
-            (1920, 1920, "1080p — Square HD"),
-            (1920, 1080, "1080p — Full HD"),
-            (1280, 720,  "720p  — HD"),
-            (854,  480,  "480p  — SD"),
-            (640,  360,  "360p  — Baja"),
+            (1920, 1920, "1080p — Square"),
+            (1920, 1080, "1080p — Rectangular")
         ]

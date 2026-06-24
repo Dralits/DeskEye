@@ -1,8 +1,11 @@
+import threading
 import time
 import logging
 from typing import Optional
 import os
 import sys
+from urllib.request import urlopen
+from urllib.error import URLError
 
 import cv2
 import numpy as np
@@ -237,8 +240,13 @@ class MainWindow(QMainWindow):
         self.btn_stop.setObjectName("btnStop")
         self.btn_stop.clicked.connect(self._on_disconnect)
         self.btn_stop.setEnabled(False)
+        self.btn_toggle = QPushButton("⟲  Toggle")
+        self.btn_toggle.setObjectName("btnToggle")
+        self.btn_toggle.clicked.connect(self._on_toggle_camera)
+        self.btn_toggle.setEnabled(False)
         btn_layout.addWidget(self.btn_connect)
         btn_layout.addWidget(self.btn_stop)
+        btn_layout.addWidget(self.btn_toggle)
         ctrl_layout.addLayout(btn_layout, 0, 4, 2, 1)
         ctrl_layout.setColumnStretch(1, 1)
 
@@ -408,6 +416,27 @@ class MainWindow(QMainWindow):
         self._show_placeholder()
         self.statusBar().showMessage("Disconnected")
 
+    def _on_toggle_camera(self):
+        """Envía GET /toggle al movil para cambiar cámara frontal y trasera."""
+        ip   = self.input_ip.text().strip()
+        port = self.input_port.text().strip()
+        url  = f"http://{ip}:{port}/toggle"
+
+        def _request():
+            try:
+                with urlopen(url, timeout=3) as resp:
+                    log.debug("toggle camera → %s  status=%s", url, resp.status)
+                self.statusBar().showMessage(f"Camera toggled")
+            except URLError as exc:
+                log.warning("toggle camera request failed: %s", exc)
+                self.statusBar().showMessage(f"Toggle failed: {exc.reason if hasattr(exc, 'reason') else exc}")
+            except Exception as exc:
+                log.warning("toggle camera request failed: %s", exc)
+                self.statusBar().showMessage(f"Toggle error: {exc}")
+
+        threading.Thread(target=_request, daemon=True).start()
+
+
     def _stop_all(self):
         if self._bridge:
             self._reader.on_frame = None  
@@ -436,6 +465,7 @@ class MainWindow(QMainWindow):
     def _set_running_mode(self, running: bool):
         self.btn_connect.setEnabled(not running)
         self.btn_stop.setEnabled(running)
+        self.btn_toggle.setEnabled(running)
         self.input_ip.setEnabled(not running)
         self.input_port.setEnabled(not running)
         self.combo_res.setEnabled(not running)

@@ -31,7 +31,8 @@ import java.util.concurrent.LinkedBlockingQueue
  */
 class MjpegHttpServer(
     port: Int,
-    private val frameRepository: FrameRepository
+    private val frameRepository: FrameRepository,
+    private val onToggle: () -> Unit
 ) : NanoHTTPD(port) {
 
     companion object {
@@ -44,11 +45,17 @@ class MjpegHttpServer(
     override fun serve(session: IHTTPSession): Response {
         return when (session.uri) {
             "/stream" -> serveStream()
+            "/toggle" -> serveToggle()
             "/", "/index.html" -> serveIndexPage()
             else -> newFixedLengthResponse(
                 Response.Status.NOT_FOUND, "text/plain", "404 Not Found"
             )
         }
+    }
+
+    private fun serveToggle(): Response {
+        onToggle()
+        return newFixedLengthResponse(Response.Status.OK, "text/plain", "Camera toggled")
     }
 
     private fun serveStream(): Response {

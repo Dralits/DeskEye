@@ -110,7 +110,10 @@ class CameraService : LifecycleService() {
     private fun startCameraAndServer(port: Int) {
         try {
             if (mjpegServer == null) {
-                mjpegServer = MjpegHttpServer(port, frameRepository)
+                mjpegServer = MjpegHttpServer(port, frameRepository) {
+                    _isBackCamera.value = !_isBackCamera.value
+                    bindCamera()
+                }
                 mjpegServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             }
             _isRunning.value = true
