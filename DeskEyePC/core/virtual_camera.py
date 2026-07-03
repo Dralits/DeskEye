@@ -4,11 +4,10 @@ core/virtual_camera.py
 Abstrae pyvirtualcam para exponer una API sencilla de start/stop/push_frame.
 
 pyvirtualcam soporta distintos backends según el SO y el driver instalado;
-este módulo los prueba en el orden de preferencia correcto para cada SO:
+este módulo usa el backend correcto para cada SO:
 
   Windows  →  'unitycapture' (Unity Capture, instalado automáticamente por el
-                               wizard de configuración, sin necesidad de OBS)
-               'obs'          (fallback si el usuario ya tenía OBS)
+                               wizard de configuración)
 
   Linux    →  'v4l2'          (v4l2loopback, instalado automáticamente)
 
@@ -48,13 +47,12 @@ class VirtualCamera:
             cam.stop()
     """
 
-    # Backends en orden de preferencia según el SO.
-    # Windows: primero unitycapture (instalado por el wizard sin necesitar OBS),
-    #          luego obs como fallback para quien ya lo tenga.
+    # Backend por SO.
+    # Windows: unitycapture (Unity Capture, instalado por el wizard).
     # Linux:   v4l2loopback instalado automáticamente.
-    # macOS:   solo obs (requiere instalación manual).
+    # macOS:   obs (requiere instalación manual).
     _BACKENDS_BY_OS: dict = {
-        "Windows": ["unitycapture", "obs"],
+        "Windows": ["unitycapture"],
         "Linux":   ["v4l2"],
         "Darwin":  ["obs"],
     }
@@ -117,7 +115,7 @@ class VirtualCamera:
 
         log.error(
             "No se encontró ningún driver de cámara virtual. "
-            "Instala OBS Studio (Windows/macOS) o v4l2loopback (Linux)."
+            "Instala Unity Capture (Windows), v4l2loopback (Linux) o OBS Studio (macOS)."
         )
         return False
 
