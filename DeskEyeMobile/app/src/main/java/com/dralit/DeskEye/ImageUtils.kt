@@ -28,7 +28,11 @@ object ImageUtils {
      * @param quality calidad de compresión JPEG (0-100). Valores entre 50-75
      *                ofrecen un buen compromiso entre tamaño y fluidez para streaming.
      */
-    fun imageProxyToJpeg(image: ImageProxy, quality: Int = 70): ByteArray {
+    fun imageProxyToJpeg(
+        image: ImageProxy,
+        quality: Int = 70,
+        additionalRotation: Int = 0
+    ): ByteArray {
         val nv21 = yuv420888ToNv21(image)
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
 
@@ -36,9 +40,9 @@ object ImageUtils {
         yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), quality, rawJpegStream)
         val rawJpeg = rawJpegStream.toByteArray()
 
-        val rotationDegrees = image.imageInfo.rotationDegrees
-        return if (rotationDegrees != 0) {
-            rotateJpeg(rawJpeg, rotationDegrees, quality)
+        val totalRotation = (image.imageInfo.rotationDegrees + additionalRotation).mod(360)
+        return if (totalRotation != 0) {
+            rotateJpeg(rawJpeg, totalRotation, quality)
         } else {
             rawJpeg
         }

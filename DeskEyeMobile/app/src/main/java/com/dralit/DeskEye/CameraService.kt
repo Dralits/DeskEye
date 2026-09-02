@@ -44,6 +44,8 @@ class CameraService : LifecycleService() {
         val isBackCamera: StateFlow<Boolean> = _isBackCamera
 
         const val ACTION_TOGGLE_CAMERA = "com.dralit.DeskEye.TOGGLE_CAMERA"
+        const val ACTION_ROTATE_RIGHT  = "com.dralit.DeskEye.ROTATE_RIGHT"
+        const val ACTION_ROTATE_LEFT   = "com.dralit.DeskEye.ROTATE_LEFT"
 
         private const val TARGET_FPS = 15
         private const val JPEG_QUALITY = 70
@@ -53,6 +55,9 @@ class CameraService : LifecycleService() {
     private var mjpegServer: MjpegHttpServer? = null
     private val frameRepository = FrameRepository()
     private var wakeLock: PowerManager.WakeLock? = null
+
+    @Volatile
+    private var manualRotationOffset = 0
 
     private var lastAnalyzedTimestampMs = 0L
     private val minFrameIntervalMs = 1000L / TARGET_FPS
@@ -65,20 +70,39 @@ class CameraService : LifecycleService() {
     override fun onStartCommand(intent: Intent?, flags: Int, startId: Int): Int {
         super.onStartCommand(intent, flags, startId)
         
-        if (intent?.action == ACTION_TOGGLE_CAMERA) {
-            _isBackCamera.value = !_isBackCamera.value
-            if (_isRunning.value) {
-                bindCamera()
+        when (intent?.action) {
+            ACTION_TOGGLE_CAMERA -> {
+                _isBackCamera.value = !_isBackCamera.value
+                if (_isRunning.value) {
+                    bindCamera()
+                }
             }
-        } else {
-            val port = intent?.getIntExtra("port", 4444) ?: 4444
-            _port.value = port
-            
-            startForegroundService(port)
-            startCameraAndServer(port)
+            ACTION_ROTATE_RIGHT -> {
+                rotateRight()
+            }
+            ACTION_ROTATE_LEFT -> {
+                rotateLeft()
+            }
+            else -> {
+                val port = intent?.getIntExtra("port", 4444) ?: 4444
+                _port.value = port
+                
+                startForegroundService(port)
+                startCameraAndServer(port)
+            }
         }
         
         return START_STICKY
+    }
+
+    fun rotateRight() {
+        manualRotationOffset = (manualRotationOffset + 90).mod(360)
+        Log.d(TAG, "Rotated right: current offset=$manualRotationOffset°")
+    }
+
+    fun rotateLeft() {
+        manualRotationOffset = (manualRotationOffset - 90).mod(360)
+        Log.d(TAG, "Rotated left: current offset=$manualRotationOffset°")
     }
 
     private fun startForegroundService(port: Int) {
@@ -110,10 +134,20 @@ class CameraService : LifecycleService() {
     private fun startCameraAndServer(port: Int) {
         try {
             if (mjpegServer == null) {
-                mjpegServer = MjpegHttpServer(port, frameRepository) {
-                    _isBackCamera.value = !_isBackCamera.value
-                    bindCamera()
-                }
+                mjpegServer = MjpegHttpServer(
+                    port = port,
+                    frameRepository = frameRepository,
+                    onToggle = {
+                        _isBackCamera.value = !_isBackCamera.value
+                        bindCamera()
+                    },
+                    onRotateRight = {
+                        rotateRight()
+                    },
+                    onRotateLeft = {
+                        rotateLeft()
+                    }
+                )
                 mjpegServer?.start(NanoHTTPD.SOCKET_READ_TIMEOUT, false)
             }
             _isRunning.value = true
@@ -166,7 +200,11 @@ class CameraService : LifecycleService() {
         lastAnalyzedTimestampMs = now
 
         try {
-            val jpeg = ImageUtils.imageProxyToJpeg(imageProxy, quality = JPEG_QUALITY)
+            val jpeg = ImageUtils.imageProxyToJpeg(
+                imageProxy,
+                quality = JPEG_QUALITY,
+                additionalRotation = manualRotationOffset
+            )
             frameRepository.updateFrame(jpeg)
             _framesServed.value++
         } catch (e: Exception) {

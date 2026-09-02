@@ -23,14 +23,7 @@ from core.virtual_camera import VirtualCamera
 log = logging.getLogger(__name__)
 
 PALETTE = {
-    "bg_dark":     "#0d0d0f",
-    "bg_panel":    "#16161a",
-    "bg_card":     "#1e1e24",
-    "border":      "#2a2a35",
-    "accent":      "#3b82f6",   
-    "accent_dim":  "#1d4ed8",
-    "text_primary":"#e8e8f0",
-    "text_muted":  "#6b6b80",
+    "text_muted":  "#e9e0cf",
     "led_green":   "#22c55e",
     "led_red":     "#ef4444",
     "led_yellow":  "#eab308",
@@ -92,9 +85,9 @@ class LedIndicator(QLabel):
         )
 
 
-# ---------------------------------------------------
-#  Hilo de publicación de frames a la cámara virtual                          
-# ---------------------------------------------------
+# ----------------------------------
+#  Mandar frames a la camara virtual                        
+# ----------------------------------
 
 class FrameBridgeThread(QThread):
     """
@@ -119,9 +112,8 @@ class FrameBridgeThread(QThread):
         self._vcam.push_frame(frame_bgr)
         self._sent += 1
 
-        #TODO: poder cambiar el tamaño de la cámara virtual en caliente.
-        # 2. Convertir a QImage para el preview (escalado a 640×640 para la UI)
-        preview = cv2.resize(frame_bgr, (640, 640), interpolation=cv2.INTER_LINEAR)
+        # 2. Convertir a QImage para que el preview tenga en cuenta la resolución.
+        preview = cv2.resize(frame_bgr, (self._vcam.width, self._vcam.height), interpolation=cv2.INTER_LINEAR)
         rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
@@ -174,6 +166,7 @@ class MainWindow(QMainWindow):
         self.setStyleSheet(_load_stylesheet())
 
         root = QWidget()
+        root.setObjectName("centralRoot")
         root_layout = QVBoxLayout(root)
         root_layout.setContentsMargins(16, 16, 16, 12)
         root_layout.setSpacing(12)
@@ -185,7 +178,7 @@ class MainWindow(QMainWindow):
 
         title = QLabel("DeskEye")
         title.setFont(QFont("Segoe UI", 16, QFont.Weight.Bold))
-        subtitle = QLabel("Turn your phone into a virtual camera for other apps.")
+        subtitle = QLabel("Turn your phone into a virtual camera")
         subtitle.setStyleSheet(f"color: {PALETTE['text_muted']}; font-size: 12px;")
         header.addWidget(title)
         header.addStretch()
@@ -193,6 +186,11 @@ class MainWindow(QMainWindow):
         root_layout.addLayout(header)
 
         # ── Preview ───────────────────────────────────────────────────
+        preview_container = QWidget()
+        preview_layout = QGridLayout(preview_container)
+        preview_layout.setContentsMargins(0, 0, 0, 0)
+        preview_layout.setSpacing(0)
+
         self.lbl_preview = QLabel()
         self.lbl_preview.setObjectName("preview")
         self.lbl_preview.setAlignment(Qt.AlignmentFlag.AlignCenter)
@@ -200,60 +198,96 @@ class MainWindow(QMainWindow):
             QSizePolicy.Policy.Expanding, QSizePolicy.Policy.Expanding
         )
         self.lbl_preview.setMinimumHeight(300)
+        preview_layout.addWidget(self.lbl_preview, 0, 0)
+
+        self.btn_toggle = QPushButton("⟲")
+        self.btn_toggle.setObjectName("btnToggle")
+        self.btn_toggle.clicked.connect(self._on_toggle_camera)
+        self.btn_toggle.setEnabled(False)
+        self.btn_toggle.setMaximumWidth(96)
+        self.btn_toggle.setToolTip("Switch camera (front/back)")
+
+        self.btn_lturn = QPushButton("⤷")
+        self.btn_lturn.setObjectName("btnlturn")
+        self.btn_lturn.clicked.connect(self._on_lturn_camera)
+        self.btn_lturn.setEnabled(False)
+        self.btn_lturn.setMaximumWidth(96)
+        self.btn_lturn.setToolTip("Rotate camera 90° left")
+
+        self.btn_rturn = QPushButton("⤶")
+        self.btn_rturn.setObjectName("btnrturn")
+        self.btn_rturn.clicked.connect(self._on_rturn_camera)
+        self.btn_rturn.setEnabled(False)
+        self.btn_rturn.setMaximumWidth(96)
+        self.btn_rturn.setToolTip("Rotate camera 90° right")
+
+        camcontrol = QHBoxLayout()
+        camcontrol.addWidget(self.btn_lturn)
+        camcontrol.addWidget(self.btn_rturn)
+        camcontrol.addWidget(self.btn_toggle)
+        preview_layout.addLayout(
+            camcontrol,
+            0, 0,
+            alignment=Qt.AlignmentFlag.AlignBottom | Qt.AlignmentFlag.AlignRight
+        )
+
         self._show_placeholder()
-        root_layout.addWidget(self.lbl_preview, stretch=1)
+        root_layout.addWidget(preview_container, stretch=1)
 
         # ── Panel de control ──────────────────────────────────────────
         control_box = QGroupBox("Connection")
+        control_box.setObjectName("controlBox")
         ctrl_layout = QGridLayout(control_box)
+        ctrl_layout.setContentsMargins(0, 4, 0, 0)
         ctrl_layout.setSpacing(8)
+      
 
-        ctrl_layout.addWidget(QLabel("Mobile IP"), 0, 0)
+        lbl_ip = QLabel("Phone IP")
+        lbl_ip.setFixedWidth(72)
+        ctrl_layout.addWidget(lbl_ip, 0, 0)
         self.input_ip = QLineEdit()
+        self.input_ip.setObjectName("inputIp")
         self.input_ip.setPlaceholderText("192.168.1.000")
         ctrl_layout.addWidget(self.input_ip, 0, 1)
 
-        ctrl_layout.addWidget(QLabel("Port"), 0, 2)
+        lbl_port = QLabel("Phone Port")
+        lbl_port.setFixedWidth(72)
+        ctrl_layout.addWidget(lbl_port, 0, 2)
         self.input_port = QLineEdit("0000")
         self.input_port.setFixedWidth(70)
         ctrl_layout.addWidget(self.input_port, 0, 3)
 
-        ctrl_layout.addWidget(QLabel("Virtual resolution"), 1, 0)
+        lbl_res = QLabel("Resolution")
+        lbl_res.setFixedWidth(72)
+        ctrl_layout.addWidget(lbl_res, 1, 0)
         self.combo_res = QComboBox()
         for w, h, label in VirtualCamera.available_resolutions():
             self.combo_res.addItem(label, (w, h))
         self.combo_res.setCurrentIndex(1)   # 720p por defecto
         ctrl_layout.addWidget(self.combo_res, 1, 1)
 
-        ctrl_layout.addWidget(QLabel("FPS virtual"), 1, 2)
-        self.combo_fps = QComboBox()
-        for fps in [60, 30, 24, 15]:
-            self.combo_fps.addItem(f"{fps} fps", fps)
-        self.combo_fps.setCurrentIndex(1)   # 30 por defecto
-        ctrl_layout.addWidget(self.combo_fps, 1, 3)
 
         # Botones Conectar / Desconectar en columna aparte
         btn_layout = QVBoxLayout()
-        self.btn_connect = QPushButton("▶  Connect")
+        self.btn_connect = QPushButton("▶  Start")
         self.btn_connect.clicked.connect(self._on_connect)
+        self.btn_connect.setMaximumWidth(110)
         self.btn_stop = QPushButton("■  Stop")
         self.btn_stop.setObjectName("btnStop")
         self.btn_stop.clicked.connect(self._on_disconnect)
         self.btn_stop.setEnabled(False)
-        self.btn_toggle = QPushButton("⟲  Toggle")
-        self.btn_toggle.setObjectName("btnToggle")
-        self.btn_toggle.clicked.connect(self._on_toggle_camera)
-        self.btn_toggle.setEnabled(False)
+        self.btn_stop.setMaximumWidth(110)
         btn_layout.addWidget(self.btn_connect)
         btn_layout.addWidget(self.btn_stop)
-        btn_layout.addWidget(self.btn_toggle)
         ctrl_layout.addLayout(btn_layout, 0, 4, 2, 1)
-        ctrl_layout.setColumnStretch(1, 1)
+        ctrl_layout.setColumnStretch(1, 0)
+        ctrl_layout.setColumnStretch(4, 1)
 
         root_layout.addWidget(control_box)
 
         # ── Panel de estado ───────────────────────────────────────────
         status_box = QGroupBox("Status")
+        status_box.setObjectName("statusBox")
         status_grid = QGridLayout(status_box)
         status_grid.setSpacing(8)
 
@@ -308,7 +342,7 @@ class MainWindow(QMainWindow):
         # ── Barra de estado inferior ───────────────────────────────────
         sb = QStatusBar()
         self.setStatusBar(sb)
-        sb.showMessage("Ready  ·  Introduce the IP and port of the Android app and press Connect")
+        sb.showMessage("Ready  ·  Introduce the IP and port shown in the Phone app and press Connect")
 
     @staticmethod
     def _muted(text: str) -> QLabel:
@@ -352,7 +386,7 @@ class MainWindow(QMainWindow):
         """Mensaje centrado cuando no hay stream activo."""
         self.lbl_preview.setText(
             "<div style='color:#3a3a48; font-size:14px; text-align:center;'>"
-            "📱  No active stream<br>"
+            "No active stream<br>"
             "<span style='font-size:11px'>Enter the phone's IP and click Connect</span>"
             "</div>"
         )
@@ -375,10 +409,9 @@ class MainWindow(QMainWindow):
 
         url = f"http://{ip}:{port}/stream"
         w, h = self.combo_res.currentData()
-        fps  = self.combo_fps.currentData()
 
         # 1. Cámara virtual
-        self._vcam = VirtualCamera(width=w, height=h, fps=float(fps))
+        self._vcam = VirtualCamera(width=w, height=h, fps=30)
         if not self._vcam.start():
             self.statusBar().showMessage(
                 "✗  Failed to open virtual camera — "
@@ -388,7 +421,7 @@ class MainWindow(QMainWindow):
             return
 
         self.led_vcam.set_color(PALETTE["led_green"])
-        self.lbl_vcam.setText(f"Open  ·  {w}×{h} @ {fps} fps")
+        self.lbl_vcam.setText(f"Open  ·  {w}×{h}")
         self.lbl_backend.setText(self._vcam.backend or "—")
 
         # 2. Lector MJPEG
@@ -437,6 +470,47 @@ class MainWindow(QMainWindow):
         threading.Thread(target=_request, daemon=True).start()
 
 
+    def _on_rturn_camera(self):
+        """Envía GET /rturn al movil para rotar la imagen de la cámara 90º."""
+        ip   = self.input_ip.text().strip()
+        port = self.input_port.text().strip()
+        url  = f"http://{ip}:{port}/rturn"
+
+        def _request():
+            try:
+                with urlopen(url, timeout=3) as resp:
+                    log.debug("rturn camera → %s  status=%s", url, resp.status)
+                self.statusBar().showMessage("Camera rotated 90° right")
+            except URLError as exc:
+                log.warning("rturn camera request failed: %s", exc)
+                self.statusBar().showMessage(f"Rotate failed: {exc.reason if hasattr(exc, 'reason') else exc}")
+            except Exception as exc:
+                log.warning("rturn camera request failed: %s", exc)
+                self.statusBar().showMessage(f"Rotate error: {exc}")
+
+        threading.Thread(target=_request, daemon=True).start()
+
+    def _on_lturn_camera(self):
+        """Envía GET /lturn al movil para rotar la imagen de la cámara -90º."""
+        ip   = self.input_ip.text().strip()
+        port = self.input_port.text().strip()
+        url  = f"http://{ip}:{port}/lturn"
+
+        def _request():
+            try:
+                with urlopen(url, timeout=3) as resp:
+                    log.debug("lturn camera → %s  status=%s", url, resp.status)
+                self.statusBar().showMessage("Camera rotated 90° left")
+            except URLError as exc:
+                log.warning("lturn camera request failed: %s", exc)
+                self.statusBar().showMessage(f"Rotate failed: {exc.reason if hasattr(exc, 'reason') else exc}")
+            except Exception as exc:
+                log.warning("lturn camera request failed: %s", exc)
+                self.statusBar().showMessage(f"Rotate error: {exc}")
+
+        threading.Thread(target=_request, daemon=True).start()
+
+
     def _stop_all(self):
         if self._bridge:
             self._reader.on_frame = None  
@@ -466,10 +540,11 @@ class MainWindow(QMainWindow):
         self.btn_connect.setEnabled(not running)
         self.btn_stop.setEnabled(running)
         self.btn_toggle.setEnabled(running)
+        self.btn_rturn.setEnabled(running)
+        self.btn_lturn.setEnabled(running)
         self.input_ip.setEnabled(not running)
         self.input_port.setEnabled(not running)
         self.combo_res.setEnabled(not running)
-        self.combo_fps.setEnabled(not running)
 
     # ------------------------------------------------------------------
     # Slots Qt
@@ -506,13 +581,11 @@ class MainWindow(QMainWindow):
         self._settings.setValue("ip",   self.input_ip.text().strip())
         self._settings.setValue("port", self.input_port.text().strip())
         self._settings.setValue("res",  self.combo_res.currentIndex())
-        self._settings.setValue("fps",  self.combo_fps.currentIndex())
 
     def _restore_settings(self):
         self.input_ip.setText(self._settings.value("ip",   "192.168.1.000"))
         self.input_port.setText(self._settings.value("port", "0000"))
         self.combo_res.setCurrentIndex(int(self._settings.value("res", 1)))
-        self.combo_fps.setCurrentIndex(int(self._settings.value("fps", 1)))
 
     # ------------------------------------------------------------------
     # Ciclo de vida

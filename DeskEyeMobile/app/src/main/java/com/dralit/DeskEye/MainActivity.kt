@@ -31,6 +31,8 @@ import androidx.compose.foundation.text.KeyboardOptions
 import androidx.compose.foundation.text.selection.SelectionContainer
 import androidx.compose.material.icons.Icons
 import androidx.compose.material.icons.filled.ContentCopy
+import androidx.compose.material.icons.automirrored.filled.RotateLeft
+import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
@@ -186,7 +188,7 @@ fun DeskEyeApp(viewModel: CameraViewModel) {
             Spacer(modifier = Modifier.height(16.dp))
             Row(
                 modifier = Modifier.fillMaxWidth(),
-                horizontalArrangement = Arrangement.spacedBy(12.dp),
+                horizontalArrangement = Arrangement.spacedBy(8.dp),
                 verticalAlignment = Alignment.CenterVertically
             ) {
                 OutlinedTextField(
@@ -199,9 +201,29 @@ fun DeskEyeApp(viewModel: CameraViewModel) {
                     modifier = Modifier.weight(1f)
                 )
                 Button(
+                    onClick = { viewModel.rotateLeft() },
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.height(56.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.RotateLeft,
+                        contentDescription = "Rotar 90° izquierda"
+                    )
+                }
+                Button(
+                    onClick = { viewModel.rotateRight() },
+                    shape = MaterialTheme.shapes.medium,
+                    modifier = Modifier.height(56.dp)
+                ) {
+                    Icon(
+                        imageVector = Icons.AutoMirrored.Filled.RotateRight,
+                        contentDescription = "Rotar 90° derecha"
+                    )
+                }
+                Button(
                     onClick = { viewModel.toggleCamera() },
                     shape = MaterialTheme.shapes.medium,
-                    modifier = Modifier.height(56.dp) // Alineamos altura con el TextField
+                    modifier = Modifier.height(56.dp)
                 ) {
                     Icon(
                         imageVector = Icons.Default.FlipCameraAndroid,

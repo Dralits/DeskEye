@@ -77,6 +77,20 @@ class CameraViewModel(application: Application) : AndroidViewModel(application) 
         getApplication<Application>().startService(intent)
     }
 
+    fun rotateRight() {
+        val intent = Intent(getApplication(), CameraService::class.java).apply {
+            action = CameraService.ACTION_ROTATE_RIGHT
+        }
+        getApplication<Application>().startService(intent)
+    }
+
+    fun rotateLeft() {
+        val intent = Intent(getApplication(), CameraService::class.java).apply {
+            action = CameraService.ACTION_ROTATE_LEFT
+        }
+        getApplication<Application>().startService(intent)
+    }
+
     private fun getLocalIpAddress(): String {
         return try {
             val interfaces = Collections.list(NetworkInterface.getNetworkInterfaces())
