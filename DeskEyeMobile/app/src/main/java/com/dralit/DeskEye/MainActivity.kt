@@ -1,6 +1,9 @@
 package com.dralit.DeskEye
 
 import android.Manifest
+import android.graphics.Bitmap
+import android.graphics.Matrix
+import android.graphics.Paint
 import android.content.Intent
 import android.content.pm.PackageManager
 import android.os.Bundle
@@ -14,7 +17,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
-import androidx.compose.foundation.Image
+import androidx.compose.foundation.Canvas
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -53,6 +56,7 @@ import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
 import androidx.compose.runtime.LaunchedEffect
+import androidx.compose.runtime.derivedStateOf
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -63,9 +67,8 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
-import androidx.compose.ui.graphics.ImageBitmap
-import androidx.compose.ui.graphics.asImageBitmap
-import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.graphics.drawscope.drawIntoCanvas
+import androidx.compose.ui.graphics.nativeCanvas
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -79,7 +82,6 @@ import androidx.lifecycle.Lifecycle
 import androidx.lifecycle.repeatOnLifecycle
 import com.dralit.DeskEye.ui.theme.DeskEyeTheme
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.delay
 import kotlinx.coroutines.flow.filterNotNull
 import kotlinx.coroutines.withContext
 import java.util.concurrent.ExecutorService
@@ -410,23 +412,33 @@ fun ServerStatusCard(uiState: CameraUiState) {
     }
 }
 
-private const val PREVIEW_MIN_INTERVAL_MS = 100L
+private const val PREVIEW_BUFFERS = 3
 
+private class PreviewFrame(val bitmap: Bitmap, val rotationDegrees: Int)
 
 @Composable
 fun StreamPreview(modifier: Modifier = Modifier) {
     val lifecycleOwner = LocalLifecycleOwner.current
-    var image by remember { mutableStateOf<ImageBitmap?>(null) }
+    val latest = remember { mutableStateOf<PreviewFrame?>(null) }
+    val hasFrame by remember { derivedStateOf { latest.value != null } }
+    val bufferPool = remember { arrayOfNulls<Bitmap>(PREVIEW_BUFFERS) }
+    val paint = remember { Paint(Paint.FILTER_BITMAP_FLAG) }
+    val matrix = remember { Matrix() }
 
     LaunchedEffect(lifecycleOwner) {
         lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            var slot = 0
             CameraService.previewFrame
                 .filterNotNull()
                 .collect { frame ->
-                    image = withContext(Dispatchers.Default) {
-                        ImageUtils.jpegToBitmap(frame)?.asImageBitmap()
+                    val bitmap = withContext(Dispatchers.Default) {
+                        ImageUtils.decodeJpeg(frame, bufferPool[slot])
                     }
-                    delay(PREVIEW_MIN_INTERVAL_MS)   // limita el preview a ~10 fps
+                    if (bitmap != null) {
+                        bufferPool[slot] = bitmap
+                        latest.value = PreviewFrame(bitmap, frame.rotationDegrees)
+                        slot = (slot + 1) % PREVIEW_BUFFERS
+                    }
                 }
         }
     }
@@ -435,15 +447,25 @@ fun StreamPreview(modifier: Modifier = Modifier) {
         modifier = modifier.background(Color.Black),
         contentAlignment = Alignment.Center
     ) {
-        val current = image
-        if (current != null) {
-            Image(
-                bitmap = current,
-                contentDescription = "Live preview of the broadcast",
-                contentScale = ContentScale.Fit,
-                modifier = Modifier.fillMaxSize()
-            )
-        } else {
+        Canvas(modifier = Modifier.fillMaxSize()) {
+            // Leer `latest` AQUÍ (fase de dibujo) hace que cada frame solo redibuje.
+            val frame = latest.value ?: return@Canvas
+            val bitmap = frame.bitmap
+            val sideways = frame.rotationDegrees == 90 || frame.rotationDegrees == 270
+            val shownW = (if (sideways) bitmap.height else bitmap.width).toFloat()
+            val shownH = (if (sideways) bitmap.width else bitmap.height).toFloat()
+            val scale = minOf(size.width / shownW, size.height / shownH)   // "Fit"
+
+            matrix.reset()
+            matrix.postTranslate(-bitmap.width / 2f, -bitmap.height / 2f)  // centro del bitmap -> origen
+            matrix.postRotate(frame.rotationDegrees.toFloat())             // sentido horario
+            matrix.postScale(scale, scale)
+            matrix.postTranslate(size.width / 2f, size.height / 2f)        // centrar en el canvas
+
+            drawIntoCanvas { it.nativeCanvas.drawBitmap(bitmap, matrix, paint) }
+        }
+
+        if (!hasFrame) {
             Column(horizontalAlignment = Alignment.CenterHorizontally) {
                 CircularProgressIndicator(color = Color.White)
                 Spacer(Modifier.height(12.dp))
