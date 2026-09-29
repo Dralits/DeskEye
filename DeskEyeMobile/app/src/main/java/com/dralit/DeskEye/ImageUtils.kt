@@ -1,6 +1,9 @@
 package com.dralit.DeskEye
 
+import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
+import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import androidx.camera.core.ImageProxy
@@ -77,5 +80,16 @@ object ImageUtils {
         }
 
         return nv21
+    }
+
+
+    fun jpegToBitmap(frame: JpegFrame): Bitmap? {
+        val decoded = BitmapFactory.decodeByteArray(frame.jpeg, 0, frame.jpeg.size) ?: return null
+        if (frame.rotationDegrees == 0) return decoded
+
+        val matrix = Matrix().apply { postRotate(frame.rotationDegrees.toFloat()) }
+        val rotated = Bitmap.createBitmap(decoded, 0, 0, decoded.width, decoded.height, matrix, true)
+        if (rotated !== decoded) decoded.recycle()
+        return rotated
     }
 }

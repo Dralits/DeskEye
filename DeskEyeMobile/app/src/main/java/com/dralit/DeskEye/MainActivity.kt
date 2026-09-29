@@ -14,6 +14,7 @@ import androidx.camera.core.CameraSelector
 import androidx.camera.core.Preview
 import androidx.camera.lifecycle.ProcessCameraProvider
 import androidx.camera.view.PreviewView
+import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
@@ -36,9 +37,12 @@ import androidx.compose.material.icons.automirrored.filled.RotateRight
 import androidx.compose.material.icons.filled.FlipCameraAndroid
 import androidx.compose.material.icons.filled.PlayArrow
 import androidx.compose.material.icons.filled.Stop
+import androidx.compose.material.icons.filled.Visibility
+import androidx.compose.material.icons.filled.VisibilityOff
 import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.Card
+import androidx.compose.material3.CircularProgressIndicator
 import androidx.compose.material3.Icon
 import androidx.compose.material3.IconButton
 import androidx.compose.material3.MaterialTheme
@@ -48,15 +52,20 @@ import androidx.compose.material3.Surface
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.collectAsState
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
+import androidx.compose.runtime.saveable.rememberSaveable
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.graphics.ImageBitmap
+import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalClipboardManager
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalLifecycleOwner
@@ -66,9 +75,16 @@ import androidx.compose.ui.text.input.KeyboardType
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.viewinterop.AndroidView
 import androidx.core.content.ContextCompat
+import androidx.lifecycle.Lifecycle
+import androidx.lifecycle.repeatOnLifecycle
 import com.dralit.DeskEye.ui.theme.DeskEyeTheme
+import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
+import kotlinx.coroutines.flow.filterNotNull
+import kotlinx.coroutines.withContext
 import java.util.concurrent.ExecutorService
 import java.util.concurrent.Executors
+import java.util.concurrent.atomic.AtomicBoolean
 
 class MainActivity : ComponentActivity() {
 
@@ -134,6 +150,7 @@ fun DeskEyeApp(viewModel: CameraViewModel) {
     }
 
     var portInput by remember { mutableStateOf("4444") }
+    var showStreamPreview by rememberSaveable { mutableStateOf(true) }
 
     Column(
         modifier = Modifier
@@ -162,6 +179,8 @@ fun DeskEyeApp(viewModel: CameraViewModel) {
                         modifier = Modifier.fillMaxSize(),
                         isBackCamera = isBack
                     )
+                } else if (showStreamPreview) {
+                    StreamPreview(modifier = Modifier.fillMaxSize())
                 } else {
                     Column(horizontalAlignment = Alignment.CenterHorizontally) {
                         Icon(
@@ -177,9 +196,25 @@ fun DeskEyeApp(viewModel: CameraViewModel) {
                             fontWeight = FontWeight.Bold
                         )
                         Text(
-                            "Preview disabled to save resources",
+                            "Preview hidden to save battery",
                             style = MaterialTheme.typography.bodyMedium,
                             color = MaterialTheme.colorScheme.onSurfaceVariant
+                        )
+                    }
+                }
+
+                if (uiState.isServerRunning) {
+                    IconButton(
+                        onClick = { showStreamPreview = !showStreamPreview },
+                        modifier = Modifier
+                            .align(Alignment.TopEnd)
+                            .padding(8.dp)
+                            .background(Color.Black.copy(alpha = 0.45f), CircleShape)
+                    ) {
+                        Icon(
+                            imageVector = if (showStreamPreview) Icons.Default.VisibilityOff else Icons.Default.Visibility,
+                            contentDescription = if (showStreamPreview) "Hide preview" else "Show preview",
+                            tint = Color.White
                         )
                     }
                 }
@@ -375,6 +410,50 @@ fun ServerStatusCard(uiState: CameraUiState) {
     }
 }
 
+private const val PREVIEW_MIN_INTERVAL_MS = 100L
+
+
+@Composable
+fun StreamPreview(modifier: Modifier = Modifier) {
+    val lifecycleOwner = LocalLifecycleOwner.current
+    var image by remember { mutableStateOf<ImageBitmap?>(null) }
+
+    LaunchedEffect(lifecycleOwner) {
+        lifecycleOwner.repeatOnLifecycle(Lifecycle.State.STARTED) {
+            CameraService.previewFrame
+                .filterNotNull()
+                .collect { frame ->
+                    image = withContext(Dispatchers.Default) {
+                        ImageUtils.jpegToBitmap(frame)?.asImageBitmap()
+                    }
+                    delay(PREVIEW_MIN_INTERVAL_MS)   // limita el preview a ~10 fps
+                }
+        }
+    }
+
+    Box(
+        modifier = modifier.background(Color.Black),
+        contentAlignment = Alignment.Center
+    ) {
+        val current = image
+        if (current != null) {
+            Image(
+                bitmap = current,
+                contentDescription = "Live preview of the broadcast",
+                contentScale = ContentScale.Fit,
+                modifier = Modifier.fillMaxSize()
+            )
+        } else {
+            Column(horizontalAlignment = Alignment.CenterHorizontally) {
+                CircularProgressIndicator(color = Color.White)
+                Spacer(Modifier.height(12.dp))
+                Text("Starting camera…", color = Color.White)
+            }
+        }
+    }
+}
+
+
 @Composable
 fun CameraPreview(
     modifier: Modifier = Modifier,
@@ -382,6 +461,8 @@ fun CameraPreview(
 ) {
     val lifecycleOwner = LocalLifecycleOwner.current
     val context = LocalContext.current
+    val previewUseCase = remember { Preview.Builder().build() }
+    val disposed = remember { AtomicBoolean(false) }
 
     AndroidView(
         modifier = modifier,
@@ -389,14 +470,13 @@ fun CameraPreview(
             PreviewView(ctx)
         },
         update = { previewView ->
+            previewUseCase.setSurfaceProvider(previewView.surfaceProvider)
+
             val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
             cameraProviderFuture.addListener({
+                if (disposed.get() || CameraService.isRunning.value) return@addListener
+
                 val cameraProvider = cameraProviderFuture.get()
-
-                val preview = Preview.Builder().build().also {
-                    it.setSurfaceProvider(previewView.surfaceProvider)
-                }
-
                 val cameraSelector = if (isBackCamera) {
                     CameraSelector.DEFAULT_BACK_CAMERA
                 } else {
@@ -404,9 +484,9 @@ fun CameraPreview(
                 }
 
                 try {
-                    cameraProvider.unbindAll()
+                    cameraProvider.unbind(previewUseCase)
                     cameraProvider.bindToLifecycle(
-                        lifecycleOwner, cameraSelector, preview
+                        lifecycleOwner, cameraSelector, previewUseCase
                     )
                 } catch (exc: Exception) {
                     exc.printStackTrace()
@@ -414,14 +494,13 @@ fun CameraPreview(
             }, ContextCompat.getMainExecutor(context))
         }
     )
-    
-    // Al destruir este componente, nos aseguramos de liberar la cámara
+
     DisposableEffect(Unit) {
+        disposed.set(false)
         onDispose {
-            val cameraProviderFuture = ProcessCameraProvider.getInstance(context)
+            disposed.set(true)
             try {
-                val cameraProvider = cameraProviderFuture.get()
-                cameraProvider.unbindAll()
+                ProcessCameraProvider.getInstance(context).get().unbind(previewUseCase)
             } catch (exc: Exception) {
                 exc.printStackTrace()
             }

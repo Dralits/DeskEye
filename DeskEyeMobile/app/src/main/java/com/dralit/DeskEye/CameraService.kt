@@ -44,6 +44,9 @@ class CameraService : LifecycleService() {
         private val _isBackCamera = MutableStateFlow(true)
         val isBackCamera: StateFlow<Boolean> = _isBackCamera
 
+        private val _previewFrame = MutableStateFlow<JpegFrame?>(null)
+        val previewFrame: StateFlow<JpegFrame?> = _previewFrame
+
         const val ACTION_TOGGLE_CAMERA = "com.dralit.DeskEye.TOGGLE_CAMERA"
         const val ACTION_ROTATE_RIGHT  = "com.dralit.DeskEye.ROTATE_RIGHT"
         const val ACTION_ROTATE_LEFT   = "com.dralit.DeskEye.ROTATE_LEFT"
@@ -130,7 +133,6 @@ class CameraService : LifecycleService() {
         acquireLocks()
     }
 
-    
     private fun acquireLocks() {
         if (wakeLock?.isHeld != true) {
             val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
@@ -187,6 +189,7 @@ class CameraService : LifecycleService() {
             }
             _isRunning.value = true
             _framesServed.value = 0
+            _previewFrame.value = null
             
             bindCamera()
 
@@ -241,6 +244,9 @@ class CameraService : LifecycleService() {
                 additionalRotation = manualRotationOffset
             )
             frameRepository.updateFrame(frame)
+            if (_previewFrame.subscriptionCount.value > 0) {
+                _previewFrame.value = frame
+            }
             _framesServed.value++
         } catch (e: Exception) {
             Log.e(TAG, "Error processing frame", e)
@@ -266,6 +272,7 @@ class CameraService : LifecycleService() {
         mjpegServer?.stop()
         mjpegServer = null
         _isRunning.value = false
+        _previewFrame.value = null
         cameraExecutor.shutdown()
         releaseLocks()
         Log.d(TAG, "Service destroyed")
