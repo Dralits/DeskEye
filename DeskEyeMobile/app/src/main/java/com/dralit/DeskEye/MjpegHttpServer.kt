@@ -9,26 +9,7 @@ import kotlinx.coroutines.launch
 import java.io.InputStream
 import java.util.concurrent.LinkedBlockingQueue
 
-/**
- * Servidor HTTP embebido que expone el último frame de la cámara como un
- * stream MJPEG (`multipart/x-mixed-replace`).
- *
- * Endpoints:
- *  - GET /stream      -> stream MJPEG continuo
- *  - GET / o /index   -> página HTML mínima con un <img> apuntando a /stream
- *
- * Implementación: por cada conexión a /stream se crea una cola
- * ([LinkedBlockingQueue]) y un InputStream personalizado que NanoHTTPD va
- * leyendo. Una corrutina suscrita a [FrameRepository.frames] vuelca cada
- * frame nuevo en la cola como un "chunk" multipart ya formateado.
- *
- * Se evita deliberadamente PipedInputStream/PipedOutputStream: esas clases
- * comprueban la vivacidad de los hilos productor/consumidor, lo cual es
- * frágil quando el productor corre sobre corrutinas con dispatchers elásticos
- * como Dispatchers.IO. Una cola bloqueante no tiene ese problema y además
- * aporta backpressure natural (si un cliente va lento, `put()` bloquea el
- * productor de ESE cliente sin afectar a los demás).
- */
+
 class MjpegHttpServer(
     port: Int,
     private val frameRepository: FrameRepository,
@@ -47,6 +28,7 @@ class MjpegHttpServer(
     override fun serve(session: IHTTPSession): Response {
         return when (session.uri) {
             "/stream" -> serveStream()
+            "/rotation" -> serveRotation()
             "/toggle" -> serveToggle()
             "/rturn" -> serveRotateRight()
             "/lturn" -> serveRotateLeft()
@@ -60,6 +42,13 @@ class MjpegHttpServer(
     private fun serveToggle(): Response {
         onToggle()
         return newFixedLengthResponse(Response.Status.OK, "text/plain", "Camera toggled")
+    }
+
+    private fun serveRotation(): Response {
+        val rotation = frameRepository.frames.replayCache.firstOrNull()?.rotationDegrees ?: 0
+        val response = newFixedLengthResponse(Response.Status.OK, "text/plain", rotation.toString())
+        response.addHeader("Cache-Control", "no-store")
+        return response
     }
 
     private fun serveRotateRight(): Response {
@@ -78,8 +67,8 @@ class MjpegHttpServer(
 
         val job = serverScope.launch {
             try {
-                frameRepository.frames.collect { jpeg ->
-                    queue.put(buildMultipartChunk(jpeg))
+                frameRepository.frames.collect { frame ->
+                    queue.put(buildMultipartChunk(frame))
                 }
             } catch (_: InterruptedException) {
                 // Esperado al cerrar la conexión.
@@ -101,9 +90,14 @@ class MjpegHttpServer(
         return response
     }
 
-    private fun buildMultipartChunk(jpeg: ByteArray): ByteArray {
-        val header = "--$BOUNDARY\r\nContent-Type: image/jpeg\r\nContent-Length: ${jpeg.size}\r\n\r\n"
-            .toByteArray(Charsets.US_ASCII)
+    private fun buildMultipartChunk(frame: JpegFrame): ByteArray {
+        val jpeg = frame.jpeg
+        val header = (
+            "--$BOUNDARY\r\n" +
+            "Content-Type: image/jpeg\r\n" +
+            "Content-Length: ${jpeg.size}\r\n" +
+            "X-Rotation: ${frame.rotationDegrees}\r\n\r\n"
+        ).toByteArray(Charsets.US_ASCII)
         val footer = "\r\n".toByteArray(Charsets.US_ASCII)
 
         val chunk = ByteArray(header.size + jpeg.size + footer.size)
@@ -121,8 +115,25 @@ class MjpegHttpServer(
                 <title>DeskEye</title>
                 <meta name="viewport" content="width=device-width, initial-scale=1" />
               </head>
-              <body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;height:100vh;">
-                <img src="/stream" style="max-width:100%;max-height:100%;" alt="stream" />
+              <body style="margin:0;background:#000;display:flex;align-items:center;justify-content:center;height:100vh;overflow:hidden;">
+                <img id="v" src="/stream" style="max-width:100vw;max-height:100vh;" alt="stream" />
+                <script>
+                  var img = document.getElementById('v');
+                  function syncRotation() {
+                    fetch('/rotation', {cache: 'no-store'})
+                      .then(function (r) { return r.text(); })
+                      .then(function (t) {
+                        var r = parseInt(t, 10) || 0;
+                        var sideways = (r === 90 || r === 270);
+                        img.style.maxWidth = sideways ? '100vh' : '100vw';
+                        img.style.maxHeight = sideways ? '100vw' : '100vh';
+                        img.style.transform = 'rotate(' + r + 'deg)';
+                      })
+                      .catch(function () {});
+                  }
+                  syncRotation();
+                  setInterval(syncRotation, 500);
+                </script>
               </body>
             </html>
         """.trimIndent()

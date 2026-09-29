@@ -9,7 +9,7 @@ from urllib.error import URLError
 
 import cv2
 import numpy as np
-from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSettings, QSize
+from PyQt6.QtCore import Qt, QThread, QTimer, pyqtSignal, QSettings, QSize
 from PyQt6.QtGui import QImage, QPixmap, QIcon, QColor, QFont
 from PyQt6.QtWidgets import (
     QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, QGridLayout,
@@ -91,14 +91,28 @@ class LedIndicator(QLabel):
 
 class FrameBridgeThread(QThread):
     """
-    Recibe frames del MjpegReader (hilo lector) y los envía a la VirtualCamera,
-    además de emitir señales Qt para actualizar la UI sin cruzar hilos.
+    Desacopla el hilo lector (red) del envío a la cámara virtual y de la UI.
+
+    Antes, TODO el trabajo por frame se hacía dentro del callback del lector:
+    reescalados a 1080p, conversión de color, copia a QImage y una señal Qt por
+    frame hacia la GUI. Si algo iba lento se dejaba de leer el socket y, peor,
+    las señales se acumulaban sin límite en la cola de la GUI (memoria + UI
+    congelada). Ahora:
+
+      * Hilo lector (MjpegReader): decodifica y solo deja el ÚLTIMO frame en
+        `_latest`. Nunca espera a nadie.
+      * Este hilo (QThread): toma el último frame, lo manda a la cámara virtual
+        y, como mucho ~20 veces/s, genera una miniatura de preview.
+        Si va lento, se saltan frames (sin acumular cola ni latencia).
+      * Hilo de la GUI: un QTimer pide la miniatura con take_preview()
+        (modelo "pull": nunca hay más de una imagen pendiente).
     """
-    frame_ready   = pyqtSignal(QImage)          
-    status_update = pyqtSignal(str, str)         
-    fps_update    = pyqtSignal(float)
-    frame_count   = pyqtSignal(int)
-    error_signal  = pyqtSignal(str)
+    fps_update  = pyqtSignal(float)
+    frame_count = pyqtSignal(int)
+
+    PREVIEW_MAX_SIDE = 640          # lado mayor de la miniatura del preview (px)
+    PREVIEW_INTERVAL = 1.0 / 20.0   # como máximo 20 miniaturas por segundo
+    STATS_INTERVAL   = 0.5          # cada cuánto se emite el FPS a la UI (s)
 
     def __init__(self, reader: MjpegReader, vcam: VirtualCamera, parent=None):
         super().__init__(parent)
@@ -106,28 +120,91 @@ class FrameBridgeThread(QThread):
         self._vcam = vcam
         self._sent = 0
 
-    def on_frame(self, frame_bgr: np.ndarray, fps: float):
-        """Llamado desde el hilo del MjpegReader."""
-        # 1. Enviar a cámara virtual
-        self._vcam.push_frame(frame_bgr)
-        self._sent += 1
+        self._lock = threading.Lock()
+        self._latest: Optional[tuple] = None      # (frame_bgr, fps)
+        self._preview: Optional[QImage] = None
+        self._new_frame = threading.Event()
+        self._stop_evt = threading.Event()
 
-        # 2. Convertir a QImage para que el preview tenga en cuenta la resolución.
-        preview = cv2.resize(frame_bgr, (self._vcam.width, self._vcam.height), interpolation=cv2.INTER_LINEAR)
-        rgb = cv2.cvtColor(preview, cv2.COLOR_BGR2RGB)
+    # -- hilo lector -------------------------------------------------------
+
+    def on_frame(self, frame_bgr: np.ndarray, fps: float):
+        """Llamado desde el hilo del MjpegReader: solo guarda el último frame."""
+        with self._lock:
+            self._latest = (frame_bgr, fps)
+        self._new_frame.set()
+
+    # -- hilo de la GUI ----------------------------------------------------
+
+    def take_preview(self) -> Optional[QImage]:
+        """Devuelve la última miniatura aún no mostrada (o None). Llamar desde la GUI."""
+        with self._lock:
+            img, self._preview = self._preview, None
+        return img
+
+    def stop(self):
+        """Pide parar al hilo y al lector, sin bloquear. Después, hacer wait()."""
+        self._stop_evt.set()
+        self._new_frame.set()
+        self._reader.stop(wait=False)
+
+    # -- este hilo ---------------------------------------------------------
+
+    def _preview_size(self) -> tuple:
+        # Mismo aspecto que la cámara virtual (es lo que verá Discord/Teams).
+        w, h = self._vcam.width, self._vcam.height
+        scale = min(1.0, self.PREVIEW_MAX_SIDE / max(w, h))
+        return max(1, int(w * scale)), max(1, int(h * scale))
+
+    def _store_preview(self, frame_bgr: np.ndarray, pw: int, ph: int):
+        small = cv2.resize(frame_bgr, (pw, ph), interpolation=cv2.INTER_LINEAR)
+        rgb = cv2.cvtColor(small, cv2.COLOR_BGR2RGB)
         h, w, ch = rgb.shape
         qimg = QImage(rgb.data, w, h, ch * w, QImage.Format.Format_RGB888).copy()
-
-        self.frame_ready.emit(qimg)
-        self.fps_update.emit(fps)
-        if self._sent % 30 == 0:
-            self.frame_count.emit(self._sent)
+        with self._lock:
+            self._preview = qimg   # sobrescribe: solo importa la más reciente
 
     def run(self):
         self._reader.on_frame = self.on_frame
         self._reader.start()
-        self.exec()   
-        self._reader.stop()
+
+        pw, ph = self._preview_size()
+        last_preview = 0.0
+        last_stats = 0.0
+        try:
+            while not self._stop_evt.is_set():
+                if not self._new_frame.wait(timeout=0.2):
+                    continue
+                self._new_frame.clear()
+
+                with self._lock:
+                    item = self._latest
+                if item is None:
+                    continue
+                frame, fps = item
+
+                # 1. Cámara virtual (incluye el reescalado a la resolución elegida)
+                self._vcam.push_frame(frame)
+                self._sent += 1
+
+                now = time.monotonic()
+
+                # 2. Miniatura para el preview (limitada en frecuencia y tamaño)
+                if now - last_preview >= self.PREVIEW_INTERVAL:
+                    last_preview = now
+                    self._store_preview(frame, pw, ph)
+
+                # 3. Estadísticas (poco frecuentes)
+                if now - last_stats >= self.STATS_INTERVAL:
+                    last_stats = now
+                    self.fps_update.emit(fps)
+                if self._sent % 30 == 0:
+                    self.frame_count.emit(self._sent)
+        finally:
+            self._reader.on_frame = None
+            # Sin join: si el móvil se ha quedado mudo, el lector sigue bloqueado en
+            # el socket hasta su timeout (5 s). Es un hilo daemon y muere solo.
+            self._reader.stop(wait=False)
 
 
 # --------------------------------------------------------------------------- #
@@ -136,8 +213,16 @@ class FrameBridgeThread(QThread):
 
 class MainWindow(QMainWindow):
 
+    # El MjpegReader notifica desde su propio hilo. Los widgets de Qt solo se
+    # pueden tocar desde el hilo de la GUI, así que el reader emite estas señales
+    # (thread-safe, entrega encolada) en vez de llamar directamente a los widgets.
+    stream_status_changed = pyqtSignal(str)
+    stream_error = pyqtSignal(str)
+
     def __init__(self, driver_ready: bool = True):
         super().__init__()
+        self.stream_status_changed.connect(self._on_stream_status)
+        self.stream_error.connect(lambda msg: self.statusBar().showMessage(f"⚠  {msg}"))
         self.setWindowTitle("DeskEye")
         self.setMinimumSize(760, 680)
 
@@ -150,6 +235,11 @@ class MainWindow(QMainWindow):
         self._reader: Optional[MjpegReader] = None
         self._vcam: Optional[VirtualCamera] = None
         self._bridge: Optional[FrameBridgeThread] = None
+
+        # Pide al hilo puente la miniatura más reciente (modelo "pull", ver FrameBridgeThread)
+        self._preview_timer = QTimer(self)
+        self._preview_timer.setInterval(50)          # ~20 fps de preview
+        self._preview_timer.timeout.connect(self._poll_preview)
 
         self._settings = QSettings("Dralit", "DeskEye")
         self._setup_ui()
@@ -426,12 +516,11 @@ class MainWindow(QMainWindow):
 
         # 2. Lector MJPEG
         self._reader = MjpegReader(url)
-        self._reader.on_status = self._on_stream_status
-        self._reader.on_error  = lambda msg: self.statusBar().showMessage(f"⚠  {msg}")
+        self._reader.on_status = self.stream_status_changed.emit
+        self._reader.on_error  = self.stream_error.emit
 
         # 3. Hilo puente
         self._bridge = FrameBridgeThread(self._reader, self._vcam, parent=self)
-        self._bridge.frame_ready.connect(self._update_preview)
         self._bridge.fps_update.connect(
             lambda fps: self.lbl_fps.setText(f"{fps:.1f} fps")
         )
@@ -439,6 +528,7 @@ class MainWindow(QMainWindow):
             lambda n: self.lbl_frames.setText(str(n))
         )
         self._bridge.start()
+        self._preview_timer.start()
 
         self.lbl_url.setText(url)
         self._save_settings()
@@ -512,14 +602,20 @@ class MainWindow(QMainWindow):
 
 
     def _stop_all(self):
+        self._preview_timer.stop()
+
+        if self._reader:
+            # Evita que el "Disconnected" final del reader llegue tarde y pise la UI ya reseteada.
+            self._reader.on_status = None
+            self._reader.on_error = None
+
         if self._bridge:
-            self._reader.on_frame = None  
-            self._bridge.quit()
-            self._bridge.wait(3000)
+            self._bridge.stop()
+            self._bridge.wait(2000)   # el bucle del puente sale en <0,2 s
             self._bridge = None
 
         if self._reader:
-            self._reader.stop()
+            self._reader.stop(wait=False)   # no bloquear la GUI esperando a la red
             self._reader = None
 
         if self._vcam:
@@ -550,6 +646,13 @@ class MainWindow(QMainWindow):
     # Slots Qt
     # ------------------------------------------------------------------
 
+    def _poll_preview(self):
+        if self._bridge is None:
+            return
+        qimg = self._bridge.take_preview()
+        if qimg is not None:
+            self._update_preview(qimg)
+
     def _update_preview(self, qimg: QImage):
         pix = QPixmap.fromImage(qimg)
         scaled = pix.scaled(
@@ -562,7 +665,10 @@ class MainWindow(QMainWindow):
     def _on_stream_status(self, status: str):
         self.lbl_stream.setText(status)
         status_lower = status.lower()
-        if any(token in status_lower for token in ("connected", "conectado")):
+        # OJO: "disconnected" contiene "connected"; comprobarlo primero.
+        if any(token in status_lower for token in ("disconnected", "desconectado")):
+            self.led_stream.set_color(PALETTE["led_red"])
+        elif any(token in status_lower for token in ("connected", "conectado")):
             self.led_stream.set_color(PALETTE["led_green"])
             self.statusBar().showMessage(f"✓  Connected to stream  ·  {self.lbl_url.text()}")
         elif any(token in status_lower for token in ("connecting", "conectando", "reconnecting", "reconectando")):

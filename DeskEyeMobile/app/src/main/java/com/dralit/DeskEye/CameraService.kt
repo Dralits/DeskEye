@@ -6,6 +6,7 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
@@ -55,6 +56,7 @@ class CameraService : LifecycleService() {
     private var mjpegServer: MjpegHttpServer? = null
     private val frameRepository = FrameRepository()
     private var wakeLock: PowerManager.WakeLock? = null
+    private var wifiLock: WifiManager.WifiLock? = null
 
     @Volatile
     private var manualRotationOffset = 0
@@ -125,10 +127,43 @@ class CameraService : LifecycleService() {
             startForeground(NOTIFICATION_ID, notification)
         }
         
-        val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
-        wakeLock = powerManager.newWakeLock(PowerManager.PARTIAL_WAKE_LOCK, "DeskEye::CameraWakeLock").apply {
-            acquire(10 * 60 * 1000L)
+        acquireLocks()
+    }
+
+    
+    private fun acquireLocks() {
+        if (wakeLock?.isHeld != true) {
+            val powerManager = getSystemService(Context.POWER_SERVICE) as PowerManager
+            wakeLock = powerManager.newWakeLock(
+                PowerManager.PARTIAL_WAKE_LOCK, "DeskEye::CameraWakeLock"
+            ).apply {
+                setReferenceCounted(false)
+                acquire()
+            }
         }
+
+        if (wifiLock?.isHeld != true) {
+            val wifiManager = applicationContext.getSystemService(Context.WIFI_SERVICE) as WifiManager
+            // FULL_LOW_LATENCY existe desde API 29; en versiones anteriores se usa FULL_HIGH_PERF
+            // (deprecado en API 34, donde ya no se usa).
+            @Suppress("DEPRECATION")
+            val mode = if (Build.VERSION.SDK_INT >= Build.VERSION_CODES.Q) {
+                WifiManager.WIFI_MODE_FULL_LOW_LATENCY
+            } else {
+                WifiManager.WIFI_MODE_FULL_HIGH_PERF
+            }
+            wifiLock = wifiManager.createWifiLock(mode, "DeskEye::WifiLock").apply {
+                setReferenceCounted(false)
+                acquire()
+            }
+        }
+    }
+
+    private fun releaseLocks() {
+        wakeLock?.let { if (it.isHeld) it.release() }
+        wakeLock = null
+        wifiLock?.let { if (it.isHeld) it.release() }
+        wifiLock = null
     }
 
     private fun startCameraAndServer(port: Int) {
@@ -200,12 +235,12 @@ class CameraService : LifecycleService() {
         lastAnalyzedTimestampMs = now
 
         try {
-            val jpeg = ImageUtils.imageProxyToJpeg(
+            val frame = ImageUtils.imageProxyToJpeg(
                 imageProxy,
                 quality = JPEG_QUALITY,
                 additionalRotation = manualRotationOffset
             )
-            frameRepository.updateFrame(jpeg)
+            frameRepository.updateFrame(frame)
             _framesServed.value++
         } catch (e: Exception) {
             Log.e(TAG, "Error processing frame", e)
@@ -232,9 +267,7 @@ class CameraService : LifecycleService() {
         mjpegServer = null
         _isRunning.value = false
         cameraExecutor.shutdown()
-        wakeLock?.let {
-            if (it.isHeld) it.release()
-        }
+        releaseLocks()
         Log.d(TAG, "Service destroyed")
     }
 }

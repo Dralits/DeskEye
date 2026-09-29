@@ -1,58 +1,31 @@
 package com.dralit.DeskEye
 
-import android.graphics.Bitmap
-import android.graphics.BitmapFactory
 import android.graphics.ImageFormat
-import android.graphics.Matrix
 import android.graphics.Rect
 import android.graphics.YuvImage
 import androidx.camera.core.ImageProxy
 import java.io.ByteArrayOutputStream
 
-/**
- * Utilidades de conversión de imagen.
- *
- * CameraX entrega los frames de [androidx.camera.core.ImageAnalysis] en formato
- * YUV_420_888. Para poder servirlos como MJPEG necesitamos:
- *   1) Empaquetar los 3 planos (Y, U, V) en un buffer NV21 contiguo.
- *   2) Comprimir ese NV21 a JPEG con [YuvImage].
- *   3) Corregir la rotación del sensor (la previsualización de CameraX la
- *      corrige automáticamente, pero los bytes "crudos" del analyzer no).
- */
+
 object ImageUtils {
 
-    /**
-     * Convierte un frame de la cámara a un array de bytes JPEG, ya orientado
-     * correctamente según [androidx.camera.core.ImageInfo.getRotationDegrees].
-     *
-     * @param quality calidad de compresión JPEG (0-100). Valores entre 50-75
-     *                ofrecen un buen compromiso entre tamaño y fluidez para streaming.
-     */
+
     fun imageProxyToJpeg(
         image: ImageProxy,
         quality: Int = 70,
         additionalRotation: Int = 0
-    ): ByteArray {
+    ): JpegFrame {
         val nv21 = yuv420888ToNv21(image)
         val yuvImage = YuvImage(nv21, ImageFormat.NV21, image.width, image.height, null)
 
-        val rawJpegStream = ByteArrayOutputStream()
-        yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), quality, rawJpegStream)
-        val rawJpeg = rawJpegStream.toByteArray()
+        val jpegStream = ByteArrayOutputStream()
+        yuvImage.compressToJpeg(Rect(0, 0, image.width, image.height), quality, jpegStream)
 
         val totalRotation = (image.imageInfo.rotationDegrees + additionalRotation).mod(360)
-        return if (totalRotation != 0) {
-            rotateJpeg(rawJpeg, totalRotation, quality)
-        } else {
-            rawJpeg
-        }
+        return JpegFrame(jpegStream.toByteArray(), totalRotation)
     }
 
-    /**
-     * Empaqueta los planos Y, U, V de un [ImageProxy] en formato YUV_420_888
-     * en un único array NV21 (Y seguido de V/U intercalados), respetando
-     * rowStride/pixelStride de cada plano (no siempre coinciden con el ancho/alto).
-     */
+
     private fun yuv420888ToNv21(image: ImageProxy): ByteArray {
         val width = image.width
         val height = image.height
@@ -104,23 +77,5 @@ object ImageUtils {
         }
 
         return nv21
-    }
-
-    private fun rotateJpeg(jpegBytes: ByteArray, rotationDegrees: Int, quality: Int): ByteArray {
-        val bitmap = BitmapFactory.decodeByteArray(jpegBytes, 0, jpegBytes.size)
-            ?: return jpegBytes
-
-        val matrix = Matrix().apply { postRotate(rotationDegrees.toFloat()) }
-        val rotatedBitmap = Bitmap.createBitmap(
-            bitmap, 0, 0, bitmap.width, bitmap.height, matrix, true
-        )
-
-        val out = ByteArrayOutputStream()
-        rotatedBitmap.compress(Bitmap.CompressFormat.JPEG, quality, out)
-
-        bitmap.recycle()
-        rotatedBitmap.recycle()
-
-        return out.toByteArray()
     }
 }
