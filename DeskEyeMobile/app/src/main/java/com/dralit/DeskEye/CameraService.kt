@@ -6,11 +6,16 @@ import android.app.NotificationManager
 import android.content.Context
 import android.content.Intent
 import android.content.pm.ServiceInfo
+import android.hardware.camera2.CameraCharacteristics
+import android.hardware.camera2.CaptureRequest
 import android.net.wifi.WifiManager
 import android.os.Build
 import android.os.PowerManager
 import android.util.Log
 import android.util.Size
+import androidx.camera.camera2.interop.Camera2CameraInfo
+import androidx.camera.camera2.interop.Camera2Interop
+import androidx.camera.camera2.interop.ExperimentalCamera2Interop
 import androidx.camera.core.CameraSelector
 import androidx.camera.core.ImageAnalysis
 import androidx.camera.core.ImageProxy
@@ -51,8 +56,10 @@ class CameraService : LifecycleService() {
         const val ACTION_ROTATE_RIGHT  = "com.dralit.DeskEye.ROTATE_RIGHT"
         const val ACTION_ROTATE_LEFT   = "com.dralit.DeskEye.ROTATE_LEFT"
 
-        private const val TARGET_FPS = 15
+        private const val TARGET_FPS = 30
         private const val JPEG_QUALITY = 70
+
+        private const val MIN_SMOOTH_FPS = 24
     }
 
     private lateinit var cameraExecutor: ExecutorService
@@ -64,8 +71,8 @@ class CameraService : LifecycleService() {
     @Volatile
     private var manualRotationOffset = 0
 
-    private var lastAnalyzedTimestampMs = 0L
-    private val minFrameIntervalMs = 1000L / TARGET_FPS
+    private var lastFrameTimestampNs = 0L
+    private val minFrameIntervalNs = 1_000_000_000L / TARGET_FPS * 9 / 10
 
     override fun onCreate() {
         super.onCreate()
@@ -132,6 +139,7 @@ class CameraService : LifecycleService() {
         
         acquireLocks()
     }
+
 
     private fun acquireLocks() {
         if (wakeLock?.isHeld != true) {
@@ -204,21 +212,24 @@ class CameraService : LifecycleService() {
         cameraProviderFuture.addListener({
             val cameraProvider = cameraProviderFuture.get()
             
-            val imageAnalysis = ImageAnalysis.Builder()
+            val cameraSelector = if (_isBackCamera.value) {
+                CameraSelector.DEFAULT_BACK_CAMERA
+            } else {
+                CameraSelector.DEFAULT_FRONT_CAMERA
+            }
+
+            val analysisBuilder = ImageAnalysis.Builder()
                 .setTargetResolution(Size(640, 480))
                 .setBackpressureStrategy(ImageAnalysis.STRATEGY_KEEP_ONLY_LATEST)
+            applySmoothFpsRange(analysisBuilder, cameraProvider, cameraSelector)
+
+            val imageAnalysis = analysisBuilder
                 .build()
                 .also {
                     it.setAnalyzer(cameraExecutor) { imageProxy ->
                         processFrame(imageProxy)
                     }
                 }
-
-            val cameraSelector = if (_isBackCamera.value) {
-                CameraSelector.DEFAULT_BACK_CAMERA
-            } else {
-                CameraSelector.DEFAULT_FRONT_CAMERA
-            }
 
             try {
                 cameraProvider.unbindAll()
@@ -229,13 +240,42 @@ class CameraService : LifecycleService() {
         }, ContextCompat.getMainExecutor(this))
     }
 
+
+    @OptIn(ExperimentalCamera2Interop::class)
+    private fun applySmoothFpsRange(
+        builder: ImageAnalysis.Builder,
+        cameraProvider: ProcessCameraProvider,
+        cameraSelector: CameraSelector
+    ) {
+        try {
+            val cameraInfo = cameraSelector.filter(cameraProvider.availableCameraInfos).firstOrNull()
+                ?: return
+            val ranges = Camera2CameraInfo.from(cameraInfo).getCameraCharacteristic(
+                CameraCharacteristics.CONTROL_AE_AVAILABLE_TARGET_FPS_RANGES
+            ) ?: return
+
+            val best = ranges
+                .filter { it.upper == TARGET_FPS && it.lower >= MIN_SMOOTH_FPS }
+                .minByOrNull { it.lower }
+                ?: return
+
+            Camera2Interop.Extender(builder).setCaptureRequestOption(
+                CaptureRequest.CONTROL_AE_TARGET_FPS_RANGE, best
+            )
+            Log.d(TAG, "Requested AE fps range $best")
+        } catch (e: Exception) {
+            Log.w(TAG, "Could not set AE fps range; using camera default", e)
+        }
+    }
+
     private fun processFrame(imageProxy: ImageProxy) {
-        val now = System.currentTimeMillis()
-        if (now - lastAnalyzedTimestampMs < minFrameIntervalMs) {
+        val timestampNs = imageProxy.imageInfo.timestamp
+        val elapsedNs = timestampNs - lastFrameTimestampNs
+        if (lastFrameTimestampNs != 0L && elapsedNs >= 0 && elapsedNs < minFrameIntervalNs) {
             imageProxy.close()
             return
         }
-        lastAnalyzedTimestampMs = now
+        lastFrameTimestampNs = timestampNs
 
         try {
             val frame = ImageUtils.imageProxyToJpeg(

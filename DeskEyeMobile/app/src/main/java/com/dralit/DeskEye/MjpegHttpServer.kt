@@ -7,7 +7,10 @@ import kotlinx.coroutines.SupervisorJob
 import kotlinx.coroutines.cancel
 import kotlinx.coroutines.launch
 import java.io.InputStream
-import java.util.concurrent.LinkedBlockingQueue
+import java.net.ServerSocket
+import java.net.Socket
+import java.util.concurrent.locks.ReentrantLock
+import kotlin.concurrent.withLock
 
 
 class MjpegHttpServer(
@@ -20,10 +23,25 @@ class MjpegHttpServer(
 
     companion object {
         private const val BOUNDARY = "frameboundary"
-        private const val QUEUE_CAPACITY = 4
+
+        private const val SEND_BUFFER_BYTES = 128 * 1024
     }
 
     private val serverScope = CoroutineScope(SupervisorJob() + Dispatchers.IO)
+
+    init {
+
+        setServerSocketFactory(object : NanoHTTPD.ServerSocketFactory {
+            override fun create(): ServerSocket = object : ServerSocket() {
+                override fun accept(): Socket {
+                    val socket = super.accept()
+                    socket.tcpNoDelay = true
+                    socket.sendBufferSize = SEND_BUFFER_BYTES
+                    return socket
+                }
+            }
+        })
+    }
 
     override fun serve(session: IHTTPSession): Response {
         return when (session.uri) {
@@ -62,22 +80,19 @@ class MjpegHttpServer(
     }
 
     private fun serveStream(): Response {
-        // Cola de "chunks" multipart ya formateados, pendientes de enviar a ESTE cliente.
-        val queue = LinkedBlockingQueue<ByteArray>(QUEUE_CAPACITY)
+        val mailbox = LatestChunkMailbox()
 
         val job = serverScope.launch {
             try {
                 frameRepository.frames.collect { frame ->
-                    queue.put(buildMultipartChunk(frame))
+                    mailbox.offer(buildMultipartChunk(frame))
                 }
-            } catch (_: InterruptedException) {
-                // Esperado al cerrar la conexión.
             } finally {
-                queue.offer(ByteArray(0))
+                mailbox.close()
             }
         }
 
-        val stream = QueueInputStream(queue) { job.cancel() }
+        val stream = MailboxInputStream(mailbox) { job.cancel() }
 
         val response = newChunkedResponse(
             Response.Status.OK,
@@ -145,12 +160,40 @@ class MjpegHttpServer(
         super.stop()
     }
 
-    /**
-     * InputStream que lee bloques de bytes desde una [LinkedBlockingQueue].
-     * Un array vacío actúa como marca de fin de stream ("poison pill").
-     */
-    private class QueueInputStream(
-        private val queue: LinkedBlockingQueue<ByteArray>,
+
+    private class LatestChunkMailbox {
+        private val lock = ReentrantLock()
+        private val notEmpty = lock.newCondition()
+        private var pending: ByteArray? = null
+        private var closed = false
+
+        fun offer(chunk: ByteArray) {
+            lock.withLock {
+                if (closed) return@withLock
+                pending = chunk            // sobrescribe el anterior si nadie lo ha leído
+                notEmpty.signal()
+            }
+        }
+
+        fun close() {
+            lock.withLock {
+                closed = true
+                pending = null
+                notEmpty.signalAll()
+            }
+        }
+
+        fun take(): ByteArray? = lock.withLock {
+            while (pending == null && !closed) {
+                notEmpty.await()
+            }
+            if (closed) null else pending.also { pending = null }
+        }
+    }
+
+    /** InputStream que va sirviendo a NanoHTTPD los chunks del [LatestChunkMailbox]. */
+    private class MailboxInputStream(
+        private val mailbox: LatestChunkMailbox,
         private val onClose: () -> Unit
     ) : InputStream() {
 
@@ -167,19 +210,19 @@ class MjpegHttpServer(
         override fun read(b: ByteArray, off: Int, len: Int): Int {
             if (closed) return -1
 
-            while (current == null || pos >= current!!.size) {
+            val active: ByteArray = current?.takeIf { pos < it.size } ?: run {
                 val next = try {
-                    queue.take()
-                } catch (e: InterruptedException) {
-                    return -1
-                }
-                if (next.isEmpty()) return -1 // poison pill
+                    mailbox.take()
+                } catch (_: InterruptedException) {
+                    null
+                } ?: return -1
                 current = next
                 pos = 0
+                next
             }
 
-            val toCopy = minOf(current!!.size - pos, len)
-            System.arraycopy(current!!, pos, b, off, toCopy)
+            val toCopy = minOf(active.size - pos, len)
+            System.arraycopy(active, pos, b, off, toCopy)
             pos += toCopy
             return toCopy
         }
@@ -187,8 +230,7 @@ class MjpegHttpServer(
         override fun close() {
             if (closed) return
             closed = true
-            queue.clear()
-            queue.offer(ByteArray(0))
+            mailbox.close()
             onClose()
         }
     }
